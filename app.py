@@ -1,25 +1,93 @@
+import pandas as pd
 import requests
 import streamlit as st
-import pandas as pd
 
 BACKEND_AGENT_URL = "http://127.0.0.1:8000/api/agent/execute"
 BACKEND_EXPORT_URL = "http://127.0.0.1:8000/api/export"
 
-st.set_page_config(page_title="Agentic Document Processor", layout="wide")
+st.set_page_config(page_title="Agentic Document Processor PRO", layout="wide")
 
-st.title("📄 Agentic Document Processor")
+st.title("📄 Agentic Document Processor PRO")
 
-uploaded_file = st.file_uploader(
-    "Sube un documento (.pdf, .docx, .txt)",
-    type=["pdf", "docx", "txt"]
+with st.sidebar:
+    st.header("Carga de documentos")
+
+    uploaded_file = st.file_uploader(
+        "Documento principal (.pdf, .docx, .txt)",
+        type=["pdf", "docx", "txt"],
+        key="main_file",
+    )
+
+    second_file = None
+
+modo_tarea = st.selectbox(
+    "Selecciona la tarea a realizar",
+    [
+        "Resumen de documento",
+        "Análisis financiero (gráficas e insights)",
+        "Comparación de documentos",
+        "Pregunta-Respuesta (QA-RAG)",
+    ],
 )
 
-user_request = st.text_input(
-    "¿Qué quieres hacer con el documento?",
-    value="Resume este documento"
-)
+percentage = 0
+user_request = ""
 
-percentage = st.slider("Porcentaje de resumen", 10, 80, 30)
+if modo_tarea == "Resumen de documento":
+    user_request = st.text_input(
+        "Instrucciones adicionales para el resumen",
+        value="Resume este documento",
+    )
+
+    percentage = st.slider(
+        "Porcentaje de resumen",
+        min_value=10,
+        max_value=80,
+        value=30,
+        step=10,
+    )
+
+elif modo_tarea == "Análisis financiero (gráficas e insights)":
+    user_request = (
+        "Realiza un análisis financiero integral: extrae métricas clave de los "
+        "estados financieros, identifica tendencias relevantes y genera gráficas "
+        "comparativas de ingresos, activos, beneficios, márgenes y flujos de caja."
+    )
+
+    st.info(
+        "El modo de análisis financiero extrae métricas estructuradas, "
+        "variaciones porcentuales, insights y gráficas comparativas."
+    )
+
+elif modo_tarea == "Comparación de documentos":
+    with st.sidebar:
+        st.warning("Sube un segundo documento para comparar.")
+        second_file = st.file_uploader(
+            "Documento comparativo (.pdf, .docx, .txt)",
+            type=["pdf", "docx", "txt"],
+            key="second_file",
+        )
+
+    user_request = (
+        "Compara estos dos documentos. Extrae palabras clave, similitudes, "
+        "diferencias y una conclusión comparativa."
+    )
+
+    st.info(
+        "El modo de comparación analiza ambos documentos y devuelve keywords, "
+        "similitudes, diferencias y conclusión."
+    )
+
+elif modo_tarea == "Pregunta-Respuesta (QA-RAG)":
+    user_request = st.text_input(
+        "Pregunta sobre el documento",
+        placeholder="Ejemplo: ¿Cuáles son los principales riesgos mencionados?",
+    )
+
+    st.info(
+        "El modo QA-RAG recupera fragmentos relevantes del documento y responde "
+        "usando ese contexto."
+    )
 
 if "last_result" not in st.session_state:
     st.session_state.last_result = None
@@ -29,7 +97,15 @@ if "last_summary_text" not in st.session_state:
 
 if st.button("Procesar documento"):
     if not uploaded_file:
-        st.error("Debes subir un archivo.")
+        st.error("Debes subir un archivo principal.")
+        st.stop()
+
+    if modo_tarea == "Comparación de documentos" and not second_file:
+        st.error("Para comparar documentos debes subir un segundo archivo.")
+        st.stop()
+
+    if modo_tarea == "Pregunta-Respuesta (QA-RAG)" and not user_request.strip():
+        st.error("Debes escribir una pregunta sobre el documento.")
         st.stop()
 
     with st.spinner("Procesando..."):
@@ -37,9 +113,12 @@ if st.button("Procesar documento"):
             "file": (uploaded_file.name, uploaded_file.getvalue())
         }
 
+        if second_file:
+            files["second_file"] = (second_file.name, second_file.getvalue())
+
         data = {
             "percentage": str(percentage),
-            "user_request": user_request
+            "user_request": user_request,
         }
 
         try:
@@ -47,7 +126,7 @@ if st.button("Procesar documento"):
                 BACKEND_AGENT_URL,
                 files=files,
                 data=data,
-                timeout=300
+                timeout=300,
             )
 
             if response.status_code != 200:
@@ -77,29 +156,51 @@ if result:
     st.success("Procesamiento completado")
 
     st.subheader("Información general")
-    st.write("Tipo de documento:", result.get("document_type"))
-    st.write("Intención detectada:", result.get("user_intent"))
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.metric("Tipo de documento", str(result.get("document_type", "-")))
+
+    with col2:
+        st.metric("Intención detectada", str(result.get("user_intent", "-")))
+
+    with col3:
+        st.metric("Estado", str(result.get("status", "completed")))
+
+    metadata = result.get("metadata", {})
+    if metadata:
+        with st.expander("Metadata general"):
+            st.json(metadata)
 
     summary = result.get("summary_result")
 
     if summary:
         st.subheader("Resumen")
 
-        st.write("Palabras originales:", summary.get("original_words"))
-        st.write("Palabras objetivo:", summary.get("target_words"))
-        st.write("Palabras reales:", summary.get("summary_words"))
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric("Palabras originales", summary.get("original_words"))
+
+        with col2:
+            st.metric("Palabras objetivo", summary.get("target_words"))
+
+        with col3:
+            st.metric("Palabras reales", summary.get("summary_words"))
 
         if summary.get("was_capped"):
-            st.warning("El resumen fue limitado a 5000 palabras")
+            st.warning("El resumen fue limitado a 5000 palabras.")
 
         summary_text = summary.get("summary", "")
         st.text_area("Resumen generado", summary_text, height=350)
 
         st.subheader("⬇️ Descargar resumen")
+
         output_format = st.selectbox(
             "Formato de exportación",
             ["txt", "pdf", "docx"],
-            key="export_format"
+            key="export_format",
         )
 
         if st.button("Generar archivo descargable"):
@@ -108,9 +209,9 @@ if result:
                     BACKEND_EXPORT_URL,
                     data={
                         "summary": summary_text,
-                        "output_format": output_format
+                        "output_format": output_format,
                     },
-                    timeout=300
+                    timeout=300,
                 )
 
                 if export_response.status_code != 200:
@@ -131,7 +232,7 @@ if result:
                     label=f"Descargar resumen en {output_format.upper()}",
                     data=export_response.content,
                     file_name=f"resumen.{output_format}",
-                    mime=mime_map[output_format]
+                    mime=mime_map[output_format],
                 )
 
             except requests.exceptions.RequestException as exc:
@@ -140,13 +241,18 @@ if result:
     analytics = result.get("analytics_result")
 
     if analytics:
-        st.subheader("Analytics")
+        st.subheader("Analytics financiero")
 
         rows = analytics.get("rows", [])
         metrics = analytics.get("metrics", [])
         percentages = analytics.get("percentages", [])
         charts = analytics.get("chart_specs", [])
         insights = analytics.get("insights", [])
+        analytics_metadata = analytics.get("metadata", {})
+
+        if analytics_metadata:
+            with st.expander("Metadata del análisis"):
+                st.json(analytics_metadata)
 
         if insights:
             st.write("### Insights")
@@ -229,6 +335,80 @@ if result:
         analytics_warnings = analytics.get("warnings", [])
         if analytics_warnings:
             st.warning(analytics_warnings)
+
+    comparison = result.get("comparison_result")
+
+    if comparison:
+        st.subheader("Comparación de documentos")
+
+        comparison_metadata = comparison.get("metadata", {})
+        if comparison_metadata:
+            with st.expander("Metadata de comparación"):
+                st.json(comparison_metadata)
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            st.write("### Documento A")
+            summary_a = comparison.get("document_a_summary")
+            if summary_a:
+                st.write(summary_a)
+
+            keywords_a = comparison.get("document_a_keywords", [])
+            if keywords_a:
+                st.write("**Palabras clave:**")
+                st.write(", ".join(keywords_a))
+
+        with col_b:
+            st.write("### Documento B")
+            summary_b = comparison.get("document_b_summary")
+            if summary_b:
+                st.write(summary_b)
+
+            keywords_b = comparison.get("document_b_keywords", [])
+            if keywords_b:
+                st.write("**Palabras clave:**")
+                st.write(", ".join(keywords_b))
+
+        similarities = comparison.get("similarities", [])
+        if similarities:
+            st.write("### Similitudes")
+            for item in similarities:
+                st.write(f"- {item}")
+
+        differences = comparison.get("differences", [])
+        if differences:
+            st.write("### Diferencias")
+            for item in differences:
+                st.write(f"- {item}")
+
+        comparison_summary = comparison.get("comparison_summary")
+        if comparison_summary:
+            st.write("### Conclusión comparativa")
+            st.info(comparison_summary)
+
+    qa = result.get("qa_result")
+
+    if qa:
+        st.subheader("Pregunta-Respuesta sobre documento")
+
+        st.write("### Pregunta")
+        st.write(qa.get("question"))
+
+        st.write("### Respuesta")
+        st.write(qa.get("answer"))
+
+        qa_metadata = qa.get("metadata", {})
+        if qa_metadata:
+            with st.expander("Metadata QA-RAG"):
+                st.json(qa_metadata)
+
+        retrieved_chunks = qa.get("retrieved_chunks", [])
+        if retrieved_chunks:
+            with st.expander("Fragmentos recuperados"):
+                for index, chunk in enumerate(retrieved_chunks, start=1):
+                    st.write(f"#### Fragmento {index}")
+                    st.text(chunk)
 
     warnings = result.get("warnings", [])
     if warnings:
