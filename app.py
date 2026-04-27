@@ -142,9 +142,21 @@ if result:
     if analytics:
         st.subheader("Analytics")
 
+        rows = analytics.get("rows", [])
         metrics = analytics.get("metrics", [])
         percentages = analytics.get("percentages", [])
         charts = analytics.get("chart_specs", [])
+        insights = analytics.get("insights", [])
+
+        if insights:
+            st.write("### Insights")
+            for insight in insights:
+                st.write(f"- {insight}")
+
+        if rows:
+            st.write("### Filas financieras estructuradas")
+            df_rows = pd.DataFrame(rows)
+            st.dataframe(df_rows, use_container_width=True)
 
         if metrics:
             st.write("### Métricas detectadas")
@@ -152,7 +164,7 @@ if result:
             st.dataframe(df_metrics, use_container_width=True)
 
         if percentages:
-            st.write("### Porcentajes detectados")
+            st.write("### Variaciones porcentuales")
             df_percentages = pd.DataFrame(percentages)
             st.dataframe(df_percentages, use_container_width=True)
 
@@ -161,37 +173,62 @@ if result:
 
             for idx, chart in enumerate(charts, start=1):
                 st.write(f"#### {chart.get('title', f'Gráfico {idx}')}")
+
                 if chart.get("reason"):
                     st.caption(chart["reason"])
 
                 series_list = chart.get("series", [])
+
                 if not series_list:
                     st.info("No hay series de datos para este gráfico.")
                     continue
 
-                first_series = series_list[0]
-                data_points = first_series.get("data", [])
+                rows_for_chart = []
 
-                if not data_points:
+                for serie in series_list:
+                    serie_name = serie.get("name", "Serie")
+
+                    for point in serie.get("data", []):
+                        rows_for_chart.append(
+                            {
+                                "x": point.get("x"),
+                                "series": serie_name,
+                                "y": point.get("y"),
+                            }
+                        )
+
+                if not rows_for_chart:
                     st.info("No hay puntos de datos para este gráfico.")
                     continue
 
-                df_chart = pd.DataFrame(data_points)
+                df_chart = pd.DataFrame(rows_for_chart)
 
-                if "x" not in df_chart.columns or "y" not in df_chart.columns:
+                if not {"x", "series", "y"}.issubset(df_chart.columns):
                     st.info("Formato de gráfico no válido.")
                     continue
 
-                df_chart = df_chart.set_index("x")
+                try:
+                    pivot_df = df_chart.pivot(
+                        index="x",
+                        columns="series",
+                        values="y",
+                    )
+                except Exception as exc:
+                    st.error(f"No se pudo preparar el gráfico: {exc}")
+                    continue
 
                 chart_type = chart.get("chart_type", "bar")
 
                 if chart_type == "bar":
-                    st.bar_chart(df_chart)
+                    st.bar_chart(pivot_df)
                 elif chart_type == "line":
-                    st.line_chart(df_chart)
+                    st.line_chart(pivot_df)
                 else:
                     st.write(f"Tipo de gráfico no soportado todavía: {chart_type}")
+
+        analytics_warnings = analytics.get("warnings", [])
+        if analytics_warnings:
+            st.warning(analytics_warnings)
 
     warnings = result.get("warnings", [])
     if warnings:
