@@ -4,11 +4,13 @@ import streamlit as st
 
 BACKEND_AGENT_URL = "http://127.0.0.1:8000/api/agent/execute"
 BACKEND_EXPORT_URL = "http://127.0.0.1:8000/api/export"
+BACKEND_QA_INDEX_URL = "http://127.0.0.1:8000/api/qa/index"
+BACKEND_QA_ASK_URL = "http://127.0.0.1:8000/api/qa/ask"
 
 TASK_SUMMARY = "Resumen de documento"
-TASK_ANALYTICS = "Análisis financiero (gráficas e insights)"
-TASK_COMPARE = "Comparación de dos documentos"
-TASK_QA = "Preguntas sobre el documento (QA-RAG)"
+TASK_ANALYTICS = "Análisis financiero"
+TASK_COMPARE = "Comparación de documentos"
+TASK_QA = "QA sobre documento"
 
 ALLOWED_FILE_TYPES = ["pdf", "docx", "txt", "csv", "md"]
 
@@ -16,32 +18,35 @@ ALLOWED_FILE_TYPES = ["pdf", "docx", "txt", "csv", "md"]
 def init_state() -> None:
     defaults = {
         "last_result": None,
-        "last_modo_tarea": None,
-        "last_summary_text": None,
-        "export_file_bytes": None,
-        "export_file_format": None,
+        "last_task": None,
+        "qa_messages": [],
+        "qa_file_name": None,
+        "qa_document_id": None,
+        "qa_index_metadata": None,
     }
 
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
 
 
-def reset_on_task_change(task: str) -> None:
-    if st.session_state.last_modo_tarea is None:
-        st.session_state.last_modo_tarea = task
-        return
-
-    if st.session_state.last_modo_tarea != task:
+def reset_if_task_changed(task: str) -> None:
+    if st.session_state.last_task != task:
         st.session_state.last_result = None
-        st.session_state.last_summary_text = None
-        st.session_state.export_file_bytes = None
-        st.session_state.export_file_format = None
-        st.session_state.last_modo_tarea = task
-        st.rerun()
+        st.session_state.last_task = task
+
+        if task != TASK_QA:
+            reset_qa_state()
 
 
-def post_agent_request(uploaded_file, second_file, percentage: int, user_request: str) -> dict:
-    files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
+def reset_qa_state() -> None:
+    st.session_state.qa_messages = []
+    st.session_state.qa_file_name = None
+    st.session_state.qa_document_id = None
+    st.session_state.qa_index_metadata = None
+
+
+def call_backend(file, second_file, percentage: int, user_request: str) -> dict:
+    files = {"file": (file.name, file.getvalue())}
 
     if second_file:
         files["second_file"] = (second_file.name, second_file.getvalue())
@@ -66,10 +71,51 @@ def post_agent_request(uploaded_file, second_file, percentage: int, user_request
     return response.json()
 
 
-def render_table(title: str, rows: list[dict]) -> None:
-    if rows:
-        st.write(f"### {title}")
-        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+def index_qa_document(file) -> dict:
+    response = requests.post(
+        BACKEND_QA_INDEX_URL,
+        files={"file": (file.name, file.getvalue())},
+        timeout=300,
+    )
+
+    if response.status_code != 200:
+        try:
+            st.error(response.json())
+        except Exception:
+            st.error(response.text)
+        st.stop()
+
+    return response.json()
+
+
+def ask_qa_document(document_id: str, question: str) -> dict:
+    response = requests.post(
+        BACKEND_QA_ASK_URL,
+        data={
+            "document_id": document_id,
+            "question": question,
+        },
+        timeout=300,
+    )
+
+    if response.status_code != 200:
+        try:
+            st.error(response.json())
+        except Exception:
+            st.error(response.text)
+        st.stop()
+
+    return response.json()
+
+
+def render_general(result: dict) -> None:
+    st.success("Procesamiento completado")
+
+    with st.expander("Información general"):
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Tipo de documento", result.get("document_type", "-"))
+        col2.metric("Intención detectada", result.get("user_intent", "-"))
+        col3.metric("Estado", result.get("status", "completed"))
 
 
 def render_items(title: str, items: list[str]) -> None:
@@ -79,24 +125,36 @@ def render_items(title: str, items: list[str]) -> None:
             st.write(f"- {item}")
 
 
-def render_general_info(result: dict) -> None:
-    st.success("Procesamiento completado")
-    st.subheader("Información general")
+def render_table(title: str, rows: list[dict]) -> None:
+    if rows:
+        st.write(f"### {title}")
+        st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+
+def render_summary(data: dict) -> None:
+    st.subheader("Resumen")
 
     col1, col2, col3 = st.columns(3)
+    col1.metric("Palabras originales", data.get("original_words"))
+    col2.metric("Palabras objetivo", data.get("target_words"))
+    col3.metric("Palabras reales", data.get("summary_words"))
 
-    col1.metric("Tipo de documento", str(result.get("document_type", "-")))
-    col2.metric("Intención detectada", str(result.get("user_intent", "-")))
-    col3.metric("Estado", str(result.get("status", "completed")))
+    if data.get("was_capped"):
+        st.warning("El resumen fue limitado a 5000 palabras.")
 
+    summary_text = data.get("summary", "")
+    st.text_area("Resumen generado", summary_text, height=350)
 
-def render_summary_download(summary_text: str) -> None:
     st.write("### Descargar resumen")
+    output_format = st.selectbox("Formato", ["txt", "pdf", "docx"])
 
-    output_format = st.selectbox(
-        "Formato de exportación",
-        ["txt", "pdf", "docx"],
-        key="export_format",
+    response = requests.post(
+        BACKEND_EXPORT_URL,
+        data={
+            "summary": summary_text,
+            "output_format": output_format,
+        },
+        timeout=300,
     )
 
     mime_map = {
@@ -105,46 +163,13 @@ def render_summary_download(summary_text: str) -> None:
         "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     }
 
-    try:
-        response = requests.post(
-            BACKEND_EXPORT_URL,
-            data={
-                "summary": summary_text,
-                "output_format": output_format,
-            },
-            timeout=300,
+    if response.status_code == 200:
+        st.download_button(
+            "Descargar",
+            response.content,
+            f"resumen.{output_format}",
+            mime=mime_map[output_format],
         )
-
-        if response.status_code == 200:
-            st.download_button(
-                label=f"Descargar resumen en {output_format.upper()}",
-                data=response.content,
-                file_name=f"resumen.{output_format}",
-                mime=mime_map[output_format],
-            )
-        else:
-            try:
-                st.error(response.json())
-            except Exception:
-                st.error(response.text)
-
-    except requests.exceptions.RequestException as exc:
-        st.error(f"Error al preparar la descarga: {exc}")
-
-
-def render_summary(summary: dict) -> None:
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("Palabras originales", summary.get("original_words"))
-    col2.metric("Palabras objetivo", summary.get("target_words"))
-    col3.metric("Palabras reales", summary.get("summary_words"))
-
-    if summary.get("was_capped"):
-        st.warning("El resumen fue limitado a 5000 palabras.")
-
-    summary_text = summary.get("summary", "")
-    st.text_area("Resumen generado", summary_text, height=350)
-    render_summary_download(summary_text)
 
 
 def render_charts(charts: list[dict]) -> None:
@@ -156,10 +181,7 @@ def render_charts(charts: list[dict]) -> None:
     for index, chart in enumerate(charts, start=1):
         st.write(f"#### {chart.get('title', f'Gráfico {index}')}")
 
-        if chart.get("reason"):
-            st.caption(chart["reason"])
-
-        chart_rows = [
+        rows = [
             {
                 "x": point.get("x"),
                 "series": serie.get("name", "Serie"),
@@ -169,106 +191,167 @@ def render_charts(charts: list[dict]) -> None:
             for point in serie.get("data", [])
         ]
 
-        if not chart_rows:
-            st.info("No hay puntos de datos para este gráfico.")
+        if not rows:
+            st.info("No hay datos para este gráfico.")
             continue
 
-        df = pd.DataFrame(chart_rows)
+        df = pd.DataFrame(rows)
 
         try:
-            pivot_df = df.pivot(index="x", columns="series", values="y")
+            pivot = df.pivot(index="x", columns="series", values="y")
         except Exception as exc:
             st.error(f"No se pudo preparar el gráfico: {exc}")
             continue
 
-        chart_type = chart.get("chart_type", "bar")
-
-        if chart_type == "line":
-            st.line_chart(pivot_df)
-        elif chart_type == "bar":
-            st.bar_chart(pivot_df)
+        if chart.get("chart_type") == "line":
+            st.line_chart(pivot)
         else:
-            st.write(f"Tipo de gráfico no soportado todavía: {chart_type}")
+            st.bar_chart(pivot)
 
 
-def render_analytics(analytics: dict) -> None:
-    render_items("Insights", analytics.get("insights", []))
-    render_table("Filas financieras estructuradas", analytics.get("rows", []))
-    render_table("Métricas detectadas", analytics.get("metrics", []))
-    render_table("Variaciones porcentuales", analytics.get("percentages", []))
-    render_charts(analytics.get("chart_specs", []))
+def render_analytics(data: dict) -> None:
+    st.subheader("Análisis financiero")
 
-    if analytics.get("warnings"):
-        st.warning(analytics["warnings"])
+    render_items("Insights", data.get("insights", []))
+    render_table("Filas financieras estructuradas", data.get("rows", []))
+    render_table("Métricas detectadas", data.get("metrics", []))
+    render_table("Variaciones porcentuales", data.get("percentages", []))
+    render_charts(data.get("chart_specs", []))
+
+    if data.get("warnings"):
+        st.warning(data["warnings"])
 
 
-def render_comparison(comparison: dict) -> None:
-    col_a, col_b = st.columns(2)
+def render_comparison(data: dict) -> None:
+    st.subheader("Comparación de documentos")
 
-    with col_a:
+    col1, col2 = st.columns(2)
+
+    with col1:
         st.write("### Documento A")
-        if comparison.get("document_a_summary"):
-            st.write(comparison["document_a_summary"])
-        if comparison.get("document_a_keywords"):
+        if data.get("document_a_summary"):
+            st.write(data["document_a_summary"])
+        if data.get("document_a_keywords"):
             st.write("**Palabras clave:**")
-            st.write(", ".join(comparison["document_a_keywords"]))
+            st.write(", ".join(data["document_a_keywords"]))
 
-    with col_b:
+    with col2:
         st.write("### Documento B")
-        if comparison.get("document_b_summary"):
-            st.write(comparison["document_b_summary"])
-        if comparison.get("document_b_keywords"):
+        if data.get("document_b_summary"):
+            st.write(data["document_b_summary"])
+        if data.get("document_b_keywords"):
             st.write("**Palabras clave:**")
-            st.write(", ".join(comparison["document_b_keywords"]))
+            st.write(", ".join(data["document_b_keywords"]))
 
-    render_items("Similitudes", comparison.get("similarities", []))
-    render_items("Diferencias", comparison.get("differences", []))
-    render_items("Ventajas del documento A", comparison.get("document_a_advantages", []))
-    render_items("Desventajas del documento A", comparison.get("document_a_disadvantages", []))
-    render_items("Ventajas del documento B", comparison.get("document_b_advantages", []))
-    render_items("Desventajas del documento B", comparison.get("document_b_disadvantages", []))
+    render_items("Similitudes", data.get("similarities", []))
+    render_items("Diferencias", data.get("differences", []))
+    render_items("Ventajas del documento A", data.get("document_a_advantages", []))
+    render_items("Desventajas del documento A", data.get("document_a_disadvantages", []))
+    render_items("Ventajas del documento B", data.get("document_b_advantages", []))
+    render_items("Desventajas del documento B", data.get("document_b_disadvantages", []))
 
-    if comparison.get("comparison_summary"):
-        st.write("### Conclusión comparativa")
-        st.info(comparison["comparison_summary"])
+    if data.get("comparison_summary"):
+        st.write("### Conclusión")
+        st.info(data["comparison_summary"])
 
 
-def render_qa(qa: dict) -> None:
-    st.write("### Pregunta")
-    st.write(qa.get("question"))
+def render_qa_chat(uploaded_file) -> None:
+    st.subheader("QA sobre documento")
 
-    st.write("### Respuesta")
-    st.write(qa.get("answer"))
+    if not uploaded_file:
+        st.info("Sube un documento para preparar el chat.")
+        return
 
-    chunks = qa.get("retrieved_chunks", [])
-    if chunks:
-        with st.expander("Fragmentos recuperados"):
-            for index, chunk in enumerate(chunks, start=1):
-                st.write(f"#### Fragmento {index}")
-                st.text(chunk)
+    if st.session_state.qa_file_name != uploaded_file.name:
+        reset_qa_state()
+        st.session_state.qa_file_name = uploaded_file.name
+
+    if not st.session_state.qa_document_id:
+        if st.button("Preparar documento para QA"):
+            with st.spinner("Indexando documento en base vectorial..."):
+                result = index_qa_document(uploaded_file)
+
+            st.session_state.qa_document_id = result.get("document_id")
+            st.session_state.qa_index_metadata = result
+            st.success("Documento preparado para QA.")
+
+        return
+
+    metadata = st.session_state.qa_index_metadata or {}
+
+    with st.expander("Información QA"):
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Documento", metadata.get("filename", uploaded_file.name))
+        col2.metric("Chunks indexados", metadata.get("chunks_indexed", "-"))
+        col3.metric("Reutilizado", "Sí" if metadata.get("already_indexed") else "No")
+
+    for message in st.session_state.qa_messages:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+            chunks = message.get("retrieved_chunks", [])
+            if chunks:
+                with st.expander("Fragmentos recuperados"):
+                    for index, chunk in enumerate(chunks, start=1):
+                        st.write(f"Fragmento {index}")
+                        st.text(chunk)
+
+    question = st.chat_input("Pregunta algo sobre el documento")
+
+    if not question:
+        return
+
+    st.session_state.qa_messages.append(
+        {
+            "role": "user",
+            "content": question,
+        }
+    )
+
+    with st.chat_message("user"):
+        st.write(question)
+
+    with st.chat_message("assistant"):
+        with st.spinner("Consultando documento..."):
+            result = ask_qa_document(
+                document_id=st.session_state.qa_document_id,
+                question=question,
+            )
+
+        answer = result.get("answer") or "No se pudo generar una respuesta."
+        retrieved_chunks = result.get("retrieved_chunks", [])
+
+        st.write(answer)
+
+        if retrieved_chunks:
+            with st.expander("Fragmentos recuperados"):
+                for index, chunk in enumerate(retrieved_chunks, start=1):
+                    st.write(f"Fragmento {index}")
+                    st.text(chunk)
+
+        st.session_state.qa_messages.append(
+            {
+                "role": "assistant",
+                "content": answer,
+                "retrieved_chunks": retrieved_chunks,
+            }
+        )
 
 
 def render_result(result: dict | None) -> None:
     if not result:
         return
 
-    render_general_info(result)
+    render_general(result)
 
-    blocks = [
-        ("Resumen", "summary_result", render_summary, "summarize"),
-        ("Análisis financiero", "analytics_result", render_analytics, "extract_analytics"),
-        ("Comparación de documentos", "comparison_result", render_comparison, "compare_documents"),
-        ("Pregunta-Respuesta sobre documento", "qa_result", render_qa, "qa_rag"),
-    ]
+    if result.get("summary_result"):
+        render_summary(result["summary_result"])
 
-    current_intent = result.get("user_intent")
+    if result.get("analytics_result"):
+        render_analytics(result["analytics_result"])
 
-    for title, key, renderer, intent in blocks:
-        payload = result.get(key)
-
-        if payload:
-            with st.expander(title, expanded=current_intent == intent):
-                renderer(payload)
+    if result.get("comparison_result"):
+        render_comparison(result["comparison_result"])
 
     if result.get("warnings"):
         st.warning(result["warnings"])
@@ -277,43 +360,33 @@ def render_result(result: dict | None) -> None:
         st.error(result["errors"])
 
 
-def validate_before_submit(task: str, uploaded_file, second_file, user_request: str) -> None:
-    if not uploaded_file:
-        st.error("Debes subir un archivo principal.")
+def validate_before_submit(task: str, file, second_file) -> None:
+    if not file:
+        st.error("Sube un documento.")
         st.stop()
 
     if task == TASK_COMPARE and not second_file:
-        st.error("Para comparar documentos debes subir un segundo archivo.")
-        st.stop()
-
-    if task == TASK_QA and not user_request.strip():
-        st.error("Debes escribir una pregunta sobre el documento.")
+        st.error("Sube un segundo documento para comparar.")
         st.stop()
 
 
 def render_task_controls(task: str):
     percentage = 0
     second_file = None
+    user_request = ""
 
     if task == TASK_SUMMARY:
         user_request = "Resume este documento"
         percentage = st.slider("Porcentaje de resumen", 10, 80, 30, step=10)
 
     elif task == TASK_ANALYTICS:
-        user_request = (
-            "Extrae métricas clave de estados financieros y genera gráficas "
-            "comparativas con insights relevantes."
-        )
-        st.info(
-            "El modo de análisis financiero extrae métricas estructuradas, "
-            "variaciones porcentuales, insights y gráficas comparativas."
-        )
+        user_request = "Extrae métricas financieras, insights y gráficas comparativas."
+        st.info("Extrae métricas estructuradas, variaciones porcentuales, insights y gráficas.")
 
     elif task == TASK_COMPARE:
         with st.sidebar:
-            st.warning("Sube un segundo documento para comparar.")
             second_file = st.file_uploader(
-                "Documento comparativo (.pdf, .docx, .txt, .csv, .md)",
+                "Segundo documento (.pdf, .docx, .txt, .csv, .md)",
                 type=ALLOWED_FILE_TYPES,
                 key="second_file",
             )
@@ -322,19 +395,11 @@ def render_task_controls(task: str):
             "Compara estos dos documentos identificando similitudes, diferencias, "
             "ventajas, desventajas y una conclusión breve."
         )
-        st.info(
-            "El modo de comparación devuelve highlights breves sobre similitudes, "
-            "diferencias, ventajas, desventajas y conclusión."
-        )
 
-    else:
-        user_request = st.text_input(
-            "Pregunta sobre el documento",
-            placeholder="Ejemplo: ¿Cuáles son los principales riesgos mencionados?",
-        )
-        st.info(
-            "El modo QA-RAG recupera fragmentos relevantes del documento y responde usando ese contexto."
-        )
+        st.info("Compara dos documentos mediante highlights breves y estructurados.")
+
+    elif task == TASK_QA:
+        st.info("Primero prepara el documento; después podrás hacer preguntas continuas.")
 
     return percentage, user_request, second_file
 
@@ -354,36 +419,30 @@ def main() -> None:
         )
 
     task = st.selectbox(
-        "Selecciona la tarea a realizar",
+        "Selecciona la tarea",
         [TASK_SUMMARY, TASK_ANALYTICS, TASK_COMPARE, TASK_QA],
     )
 
-    reset_on_task_change(task)
+    reset_if_task_changed(task)
 
     percentage, user_request, second_file = render_task_controls(task)
 
+    if task == TASK_QA:
+        render_qa_chat(uploaded_file)
+        return
+
     if st.button("Procesar documento"):
-        validate_before_submit(task, uploaded_file, second_file, user_request)
+        validate_before_submit(task, uploaded_file, second_file)
 
         with st.spinner("Procesando..."):
-            try:
-                result = post_agent_request(
-                    uploaded_file=uploaded_file,
-                    second_file=second_file,
-                    percentage=percentage,
-                    user_request=user_request,
-                )
+            result = call_backend(
+                file=uploaded_file,
+                second_file=second_file,
+                percentage=percentage,
+                user_request=user_request,
+            )
 
-                st.session_state.last_result = result
-                st.session_state.last_summary_text = (
-                    result.get("summary_result", {}) or {}
-                ).get("summary")
-                st.session_state.export_file_bytes = None
-                st.session_state.export_file_format = None
-
-            except requests.exceptions.RequestException as exc:
-                st.error(f"Error conectando con el backend: {exc}")
-                st.stop()
+            st.session_state.last_result = result
 
     render_result(st.session_state.last_result)
 
