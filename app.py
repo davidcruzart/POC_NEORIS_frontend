@@ -376,6 +376,9 @@ def render_task_controls(task: str):
     user_request = ""
 
     if task == TASK_SUMMARY:
+
+
+        
         user_request = "Resume este documento"
         percentage = st.slider("Porcentaje de resumen", 10, 80, 30, step=10)
 
