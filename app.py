@@ -1,11 +1,13 @@
+import os
 import pandas as pd
 import requests
 import streamlit as st
 
-BACKEND_AGENT_URL = "http://127.0.0.1:8000/api/agent/execute"
-BACKEND_EXPORT_URL = "http://127.0.0.1:8000/api/export"
-BACKEND_QA_INDEX_URL = "http://127.0.0.1:8000/api/qa/index"
-BACKEND_QA_ASK_URL = "http://127.0.0.1:8000/api/qa/ask"
+BACKEND_HOST = os.getenv("BACKEND_HOST", "http://127.0.0.1:8000")
+BACKEND_AGENT_URL = f"{BACKEND_HOST}/api/agent/execute"
+BACKEND_EXPORT_URL = f"{BACKEND_HOST}/api/export"
+BACKEND_QA_INDEX_URL = f"{BACKEND_HOST}/api/qa/index"
+BACKEND_QA_ASK_URL = f"{BACKEND_HOST}/api/qa/ask"
 
 TASK_SUMMARY = "Resumen de documento"
 TASK_ANALYTICS = "Análisis financiero"
